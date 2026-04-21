@@ -42,6 +42,8 @@ socket.on("load messages", (msgs) => {
     msgs.forEach((data) => {
         if (data.type === "image") {
             addImage(data);
+        } else if (data.type === "audio") {
+            addAudio(data);
         } else {
             addMessage(data);
         }
@@ -312,6 +314,257 @@ function confirmSendImage() {
     cancelSendImage();
 }
 
+// 🔹 Audio Logic
+
+let pendingAudioData = null;
+
+async function extractAudioFeatures(base64) {
+    return new Promise((resolve) => {
+        try {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const binaryStr = atob(base64.split(",")[1]);
+            const len = binaryStr.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryStr.charCodeAt(i);
+            }
+            audioCtx.decodeAudioData(bytes.buffer, (buffer) => {
+                const channelData = buffer.getChannelData(0); // Float32Array left channel
+                
+                // We need exactly a power of 2 for Meyda. e.g. 4096.
+                const frameSize = 4096;
+                let signal = new Float32Array(frameSize);
+                
+                if (channelData.length >= frameSize) {
+                    const start = Math.floor((channelData.length - frameSize) / 2);
+                    signal.set(channelData.slice(start, start + frameSize));
+                } else {
+                    signal.set(channelData);
+                }
+                
+                if (typeof Meyda === 'undefined') {
+                    console.warn("Meyda is not loaded.");
+                    resolve(null);
+                    return;
+                }
+
+                Meyda.bufferSize = frameSize;
+                Meyda.sampleRate = buffer.sampleRate;
+                const mfcc = Meyda.extract('mfcc', signal);
+                resolve(mfcc);
+            }, (err) => {
+                console.error("Audio decode error", err);
+                resolve(null);
+            });
+        } catch(e) {
+            console.error("Feature extraction failed", e);
+            resolve(null);
+        }
+    });
+}
+
+function previewAudio() {
+    const fileInput = document.getElementById("audioInput");
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    // Size limit 5MB
+    if (file.size > 5 * 1024 * 1024) {
+        alert("Audio file too large. Max 5MB allowed.");
+        fileInput.value = "";
+        return;
+    }
+
+    const originalSize = file.size;
+    document.getElementById("orig-audio-size").textContent = `(${(originalSize / 1024).toFixed(2)} KB)`;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        const origBase64 = event.target.result;
+        document.getElementById("orig-audio-element").src = origBase64;
+        
+        document.getElementById("audio-preview").style.display = "block";
+        document.getElementById("audio-loading").style.display = "block";
+        document.getElementById("audio-result-area").style.display = "none";
+        document.getElementById("audio-confirm-btn").style.display = "none";
+        
+        // Emit to server to compress multiple bitrates
+        socket.emit("compress audio multi", { base64: origBase64 }, async (response) => {
+            document.getElementById("audio-loading").style.display = "none";
+            
+            if (!response.success) {
+                alert("Audio compression failed: " + response.error);
+                cancelSendAudio();
+                return;
+            }
+
+            const origFeatures = await extractAudioFeatures(origBase64);
+            const tbody = document.getElementById("audio-cmp-body");
+            tbody.innerHTML = "";
+
+            let tableData = [];
+            let bestPick  = null;
+            let audioMap  = {};
+            const maxSize = Math.max(...response.results.map(r => r.compressedSize));
+
+            document.getElementById("comp-audio-element").src = "";
+            pendingAudioData = null;
+
+            // Colour tiers by similarity
+            function rowColor(sim) {
+                if (sim >= 0.95) return { bg: "#edfdf4", dot: "#23a55a" }; // green
+                if (sim >= 0.88) return { bg: "#eff6ff", dot: "#3b82f6" }; // blue
+                if (sim >= 0.75) return { bg: "#fffbeb", dot: "#f59e0b" }; // amber
+                return { bg: "#fef2f2", dot: "#ef4444" };                  // red
+            }
+
+            for (let i = 0; i < response.results.length; i++) {
+                const res = response.results[i];
+                const compFeatures = await extractAudioFeatures(res.compressedBase64);
+
+                let featureSim  = 0;
+                let featureLoss = 1;
+                if (origFeatures && compFeatures) {
+                    featureSim  = cosineSimilarity(origFeatures, compFeatures);
+                    featureLoss = 1 - featureSim;
+                }
+
+                // Simulated transmission @ 500 KB/s broadband
+                const transTime  = (res.compressedSize / 1024) / 500 * 1000;
+                const lossPercent = (((originalSize - res.compressedSize) / originalSize) * 100).toFixed(2);
+
+                tableData.push({
+                    "Bitrate":        res.bitrate,
+                    "Size (KB)":      Math.round(res.compressedSize / 1024),
+                    "Trans Time (ms)": Math.round(transTime),
+                    "Similarity":     featureSim.toFixed(4),
+                    "Feature Loss":   featureLoss.toFixed(4)
+                });
+
+                audioMap[res.bitrate] = {
+                    base64:        res.compressedBase64,
+                    originalSize,
+                    compressedSize: res.compressedSize,
+                    loss:           lossPercent,
+                    features:       `Sim: ${featureSim.toFixed(4)} | Loss: ${featureLoss.toFixed(4)}`,
+                    timeTaken:      res.timeTaken,
+                    bitrate:        res.bitrate
+                };
+
+                // Best pick: first bitrate with similarity >= 0.88
+                if (!bestPick && featureSim >= 0.88) bestPick = res.bitrate;
+            }
+
+            // === Terminal comparison table (matches spec) ===
+            console.log("\n%c📊 Audio Bitrate Comparison Table", "font-weight:bold;font-size:14px;color:#5865f2");
+            console.table(tableData);
+
+            // Fallback if nothing hit threshold
+            if (!bestPick && response.results.length > 0)
+                bestPick = response.results[response.results.length - 1].bitrate;
+
+            // Recommendation card
+            const recCard = document.getElementById("rec-card");
+            const recSpan = document.getElementById("audio-recommendation");
+            if (bestPick) {
+                const best = audioMap[bestPick];
+                recSpan.textContent =
+                    `${bestPick} is optimal — ${(best.compressedSize / 1024).toFixed(1)} KB payload ` +
+                    `with similarity ${best.features.split("|")[0].trim().replace("Sim: ", "")}. ` +
+                    `Best trade-off for real-time systems.`;
+                recCard.style.display = "block";
+            }
+
+            // Build table rows
+            tableData.forEach((row, idx) => {
+                const res   = response.results[idx];
+                const isBest = row.Bitrate === bestPick;
+                const sim   = parseFloat(row.Similarity);
+                const { bg, dot } = rowColor(sim);
+                const bwPct = Math.round((res.compressedSize / maxSize) * 100);
+
+                const tr = document.createElement("tr");
+                tr.className = isBest ? "best-row" : "";
+                tr.style.background = bg;
+                tr.dataset.bitrate = row.Bitrate;
+                tr.style.cursor = "pointer";
+
+                tr.innerHTML = `
+                    <td>
+                        <input type="radio" name="audio-bitrate" value="${row.Bitrate}"
+                               ${isBest ? "checked" : ""}
+                               onchange="selectAudioBitrate(this.value)">
+                    </td>
+                    <td style="font-weight:600;">
+                        <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${dot};margin-right:5px;"></span>
+                        ${row.Bitrate}${isBest ? ' <span class="badge badge-best">✦ Best</span>' : ""}
+                    </td>
+                    <td>${row["Size (KB)"]}</td>
+                    <td>${row["Trans Time (ms)"]}</td>
+                    <td style="font-weight:600;">${row.Similarity}</td>
+                    <td style="color:${sim >= 0.88 ? "var(--success)" : "var(--danger)"};">${row["Feature Loss"]}</td>
+                    <td>
+                        <div class="bw-bar-wrap">
+                            <div class="bw-bar-bg">
+                                <div class="bw-bar-fill" style="width:${bwPct}%;background:${dot};"></div>
+                            </div>
+                            <span>${bwPct}%</span>
+                        </div>
+                    </td>
+                `;
+
+                // Row click also selects
+                tr.addEventListener("click", () => {
+                    tr.querySelector("input[type=radio]").checked = true;
+                    document.querySelectorAll("#audio-cmp-body tr").forEach(r => r.classList.remove("selected-row"));
+                    tr.classList.add("selected-row");
+                    selectAudioBitrate(row.Bitrate);
+                });
+
+                tbody.appendChild(tr);
+            });
+
+            window._audioMultiMap = audioMap;
+
+            if (bestPick) selectAudioBitrate(bestPick);
+
+            document.getElementById("audio-result-area").style.display = "block";
+            document.getElementById("audio-confirm-btn").style.display  = "inline-block";
+        });
+    };
+    reader.readAsDataURL(file);
+}
+
+function selectAudioBitrate(bitrate) {
+    if (window._audioMultiMap && window._audioMultiMap[bitrate]) {
+        pendingAudioData = window._audioMultiMap[bitrate];
+        document.getElementById("comp-audio-element").src = pendingAudioData.base64;
+    }
+}
+
+function cancelSendAudio() {
+    document.getElementById("audio-preview").style.display = "none";
+    document.getElementById("audioInput").value = "";
+    document.getElementById("orig-audio-element").src = "";
+    document.getElementById("comp-audio-element").src = "";
+    pendingAudioData = null;
+}
+
+function confirmSendAudio() {
+    if (!pendingAudioData) return;
+    socket.emit("send audio", {
+        user: username,
+        audio: pendingAudioData.base64,
+        originalSize: pendingAudioData.originalSize,
+        compressedSize: pendingAudioData.compressedSize,
+        loss: pendingAudioData.loss,
+        features: pendingAudioData.features,
+        timeTaken: pendingAudioData.timeTaken,
+        bitrate: pendingAudioData.bitrate
+    });
+    cancelSendAudio();
+}
+
 // Image
 socket.on("receive image", (data) => {
     addImage(data);
@@ -373,6 +626,52 @@ function addImage(data) {
 
     li.appendChild(img);
 
+    messages.appendChild(li);
+    messages.scrollTop = messages.scrollHeight;
+}
+
+socket.on("receive audio", (data) => {
+    addAudio(data);
+});
+
+function addAudio(data) {
+    const li = document.createElement("li");
+
+    styleMessage(li, data.user);
+    
+    const title = document.createElement("b");
+    title.textContent = `${data.user}:`;
+    li.appendChild(title);
+    li.appendChild(document.createElement("br"));
+
+    const audio = document.createElement("audio");
+    audio.controls = true;
+    audio.style.width = "250px";
+    audio.style.height = "40px";
+    audio.style.marginTop = "5px";
+    audio.src = data.audio; // 64kbps mp3 base64
+    li.appendChild(audio);
+    
+    let fileMetrics = `Codec: ${data.bitrate || 'Unknown'} MP3 | Size: ${(data.compressedSize / 1024 || 0).toFixed(2)} KB`;
+    if (data.loss) {
+        fileMetrics += ` (-${data.loss}%)`;
+    }
+    if (data.timeTaken) {
+        fileMetrics += ` | Compressed in ${data.timeTaken}ms`;
+    }
+    
+    if (data.features) {
+        fileMetrics += `\nLoss Analysis: ${data.features}`;
+    }
+
+    const info = document.createElement("div");
+    info.style.fontSize = "0.75em";
+    info.style.color = data.user === username ? "#d1ecf1" : "#6c757d";
+    info.style.marginTop = "4px";
+    info.style.whiteSpace = "pre-line"; 
+    info.textContent = fileMetrics;
+    
+    li.appendChild(info);
     messages.appendChild(li);
     messages.scrollTop = messages.scrollHeight;
 }
