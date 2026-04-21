@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chatroom</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <style>
+        /* ... skipped previous css ... */
+        body {
+            font-family: Arial;
+            background: #f0f2f5;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h2 {
+            margin: 10px;
+        }
+
+        #messages {
+            width: 95%;
+            max-width: 500px;
+            height: 65vh;
+            overflow-y: auto;
+            background: white;
+            border: 1px solid #ccc;
+            padding: 10px;
+            list-style: none;
+            border-radius: 10px;
+        }
+
+        li {
+            padding: 8px;
+            margin: 5px 0;
+            background: #e4e6eb;
+            border-radius: 8px;
+            word-wrap: break-word;
+        }
+
+        #input-area {
+            width: 95%;
+            max-width: 500px;
+            display: flex;
+            gap: 5px;
+            margin-top: 10px;
+        }
+
+        #image-area {
+            width: 95%;
+            max-width: 500px;
+            display: flex;
+            gap: 5px;
+            margin: 10px;
+        }
+
+        input {
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            flex: 1;
+        }
+
+        button {
+            padding: 10px;
+            border: none;
+            background: #0084ff;
+            color: white;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #006fd6;
+        }
+
+        img {
+            max-width: 200px;
+            border-radius: 8px;
+            margin-top: 5px;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet"></script>
+</head>
+
+<body>
+
+<h2> 🗩 Chatroom</h2>
+
+<ul id="messages"></ul>
+
+<input id="username" placeholder="Enter name" />
+
+<div id="input-area">
+    <input id="input" placeholder="Type message..." />
+    <button onclick="sendMessage()">Send</button>
+</div>
+
+<div id="image-preview" style="display: none; background: white; padding: 10px; border: 1px solid #ccc; border-radius: 8px; width: 95%; max-width: 500px; margin-top: 10px;">
+    <h4 style="margin-top: 0;">Compression Preview</h4>
+    <div style="display: flex; gap: 10px; overflow-x: auto; align-items: flex-end;">
+        <div>
+            <div style="font-size: 0.8em; margin-bottom: 5px;"><b>Original</b> <span id="orig-size"></span></div>
+            <img id="orig-img" style="max-width: 150px; border: 1px solid #ddd; object-fit: contain;" />
+        </div>
+        <div>
+            <div style="font-size: 0.8em; margin-bottom: 5px;">
+                <b>Compressed</b> <span id="comp-size"></span> <br>
+                <span style="color: green; font-weight: bold;">(&darr; <span id="comp-loss"></span>%)</span><br>
+                <b>Quality:</b> <span id="comp-label" style="font-weight: bold;"></span><br>
+                MSE: <span id="comp-mse"></span> | PSNR: <span id="comp-psnr"></span> dB<br>
+                <b>Feature Analysis:</b> <span id="comp-features"></span>
+            </div>
+            <img id="comp-img" style="max-width: 150px; border: 1px solid #ddd; object-fit: contain;" />
+        </div>
+    </div>
+    <div style="margin-top: 10px;">
+        <button onclick="confirmSendImage()" style="background: #28a745;">Confirm & Send</button>
+        <button onclick="cancelSendImage()" style="background: #dc3545;">Cancel</button>
+    </div>
+</div>
+
+<div id="image-area">
+    <input type="file" id="imageInput" accept="image/*" onchange="previewImage()">
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="client.js"></script>
+
+</body>
+</html>
